@@ -50,6 +50,9 @@ metadata {
         command "requestStatusRefresh"   // ask the vehicle to push an update
         command "enableGuardMode"
         command "disableGuardMode"
+        command "preconditionStart"      // start cabin preconditioning
+        command "preconditionExtend"     // extend active preconditioning session
+        command "preconditionStop"       // stop preconditioning
 
         // --- Custom read-only attributes ---
 
@@ -195,6 +198,23 @@ def enableGuardMode() {
 def disableGuardMode() {
     logInfo("disableGuardMode()")
     parent.sendGuardModeCommand("disable")
+}
+
+def preconditionStart() {
+    logInfo("preconditionStart()")
+    // Mach-E and RCC-capable vehicles use the Ford RCC API, not the Autonomic commands endpoint
+    parent.sendRccCommand("On")
+}
+
+def preconditionExtend() {
+    logInfo("preconditionExtend()")
+    // Extending just re-sends the On command with current preferences
+    parent.sendRccCommand("On")
+}
+
+def preconditionStop() {
+    logInfo("preconditionStop()")
+    parent.sendRccCommand("Off")
 }
 
 // ---------------------------------------------------------------------------

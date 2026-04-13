@@ -49,8 +49,9 @@ definition(
 @Field String FORD_FOUNDATIONAL_API = "https://api.foundational.ford.com/api"
 @Field String FORD_VEHICLE_API      = "https://api.vehicle.ford.com/api"
 @Field String FORD_MPS_API          = "https://api.mps.ford.com/api"
-@Field String AUTONOMIC_ACCOUNT_URL = "https://accounts.autonomic.ai/v1"
-@Field String AUTONOMIC_API_URL     = "https://api.autonomic.ai/v1"
+@Field String AUTONOMIC_ACCOUNT_URL  = "https://accounts.autonomic.ai/v1"
+@Field String AUTONOMIC_API_URL      = "https://api.autonomic.ai/v1"
+@Field String AUTONOMIC_BETA_API_URL = "https://api.autonomic.ai/v1beta"
 
 // Default HTTP headers matching the FordPass Android app (okhttp/4.12.0)
 @Field Map DEFAULT_HEADERS = [
@@ -903,35 +904,41 @@ Map fetchVehicleStatus(String vin) {
  * Send a command to the vehicle via the Autonomic API.
  *
  * The command name goes in the JSON body as "type" — NOT in the URL path.
- * URL: POST /v1/command/vehicles/{vin}/commands
+ * URL: POST /v1/command/vehicles/{vin}/commands   (or /v1beta/ when version is set)
  * Body: { "type": commandName, "properties": {extra}, "tags": {}, "wakeUp": true }
+ *       Beta commands additionally include "version": version.
  *
  * Mirrors fordpass_bridge.py::__request_and_poll_command_autonomic()
  *
  * commandName: "lock", "unlock", "remoteStart", "cancelRemoteStart",
- *              "statusRefresh", "startPanicCue", etc.
- * props:       optional Map of extra fields merged into "properties" (default: empty)
+ *              "statusRefresh", "startPanicCue",
+ *              "startOnDemandPreconditioning", "extendOnDemandPreconditioning",
+ *              "stopOnDemandPreconditioning", etc.
+ * props:       optional Map merged into "properties" (default: empty)
+ * version:     when non-null, uses AUTONOMIC_BETA_API_URL and includes "version" in body
  */
-boolean sendVehicleCommand(String commandName, Map props = [:]) {
+boolean sendVehicleCommand(String commandName, Map props = [:], String version = null) {
     logDebug("sendVehicleCommand(${commandName})")
     String vin = state.vin
     if (!vin) { logError("sendVehicleCommand: no VIN configured"); return false }
     if (!ensureValidTokens()) { logError("sendVehicleCommand: token refresh failed"); return false }
 
     Map headers = [
-        "Content-Type":   "application/json",
+        "Content-Type":    "application/json",
         "Accept-Encoding": "gzip",
-        "Connection":     "keep-alive",
-        "User-Agent":     "okhttp/4.12.0",
-        "Authorization":  "Bearer ${state.autoToken}",
+        "Connection":      "keep-alive",
+        "User-Agent":      "okhttp/4.12.0",
+        "Authorization":   "Bearer ${state.autoToken}",
     ]
-    String url = "${AUTONOMIC_API_URL}/command/vehicles/${vin}/commands"
+    String baseUrl = (version != null) ? AUTONOMIC_BETA_API_URL : AUTONOMIC_API_URL
+    String url = "${baseUrl}/command/vehicles/${vin}/commands"
     Map bodyMap = [
         properties: props ?: [:],
         tags:       [:],
         type:       commandName,
         wakeUp:     true,
     ]
+    if (version != null) { bodyMap.version = version }
     String bodyJson = JsonOutput.toJson(bodyMap)
 
     boolean success = false
@@ -956,6 +963,100 @@ boolean sendVehicleCommand(String commandName, Map props = [:]) {
         logError("sendVehicleCommand(${commandName}): HTTP ${e.statusCode} — ${errBody ?: e.message}")
     } catch (Exception e) {
         logError("sendVehicleCommand(${commandName}): ${e.message}")
+    }
+    return success
+}
+
+/**
+ * Remote Climate Control (RCC) — Mach-E and other vehicles that support it.
+ *
+ * Two-step flow:
+ *   1. POST rcc/profile/status to read the vehicle's current climate preferences
+ *   2. PUT  rcc/profile/update  to activate ("On") or deactivate ("Off")
+ *
+ * Auth: auth-token + Application-Id (Ford Vehicle API, not Autonomic)
+ * Mirrors fordpass_bridge.py::req_remote_climate() + set_rcc()
+ *
+ * flag: "On" to start preconditioning, "Off" to stop
+ */
+boolean sendRccCommand(String flag) {
+    logDebug("sendRccCommand(${flag})")
+    String vin = state.vin
+    if (!vin) { logError("sendRccCommand: no VIN configured"); return false }
+    if (!ensureValidTokens()) { logError("sendRccCommand: token refresh failed"); return false }
+
+    Map regionCfg = REGIONS[state.region ?: "usa"]
+    Map fordHeaders = API_HEADERS + [
+        "auth-token":     state.fordToken,
+        "Application-Id": regionCfg.app_id,
+    ]
+
+    // Step 1: read current RCC profile to get userPreferences list
+    List userPreferences = []
+    try {
+        httpPost([
+            uri:                "${FORD_VEHICLE_API}/rcc/profile/status",
+            headers:            fordHeaders,
+            body:               JsonOutput.toJson([vin: vin]),
+            requestContentType: "application/json",
+            contentType:        "application/json",
+        ]) { resp ->
+            if (resp.status == 200) {
+                logDebug("sendRccCommand: profile/status raw response: ${resp.data}")
+                userPreferences = resp.data?.rccUserProfiles ?: []
+                logDebug("sendRccCommand: read ${userPreferences.size()} RCC preferences")
+            } else {
+                logError("sendRccCommand: profile/status HTTP ${resp.status}")
+            }
+        }
+    } catch (groovyx.net.http.HttpResponseException e) {
+        String errBody = ""
+        try { errBody = e.response?.data?.toString() ?: "" } catch (Exception ignored) {}
+        logError("sendRccCommand: profile/status HTTP ${e.statusCode} — ${errBody ?: e.message}")
+        return false
+    } catch (Exception e) {
+        logError("sendRccCommand: profile/status ${e.message}")
+        return false
+    }
+
+    if (userPreferences.isEmpty()) {
+        // profile/status returned no preferences — vehicle uses "forced" RCC mode.
+        // Mirrors fordpass_bridge.py::req_remote_climate() _remote_climate_control_forced path:
+        // inject a safe default profile (all accessories off, 22°C target).
+        logInfo("sendRccCommand: profile/status returned empty rccUserProfiles — using defaults")
+        userPreferences = [
+            [preferenceType: "RccHeatedWindshield_Rq",    preferenceValue: "Off"],
+            [preferenceType: "RccRearDefrost_Rq",         preferenceValue: "Off"],
+            [preferenceType: "RccHeatedSteeringWheel_Rq", preferenceValue: "Off"],
+            [preferenceType: "RccLeftFrontClimateSeat_Rq",  preferenceValue: "Off"],
+            [preferenceType: "RccLeftRearClimateSeat_Rq",   preferenceValue: "Off"],
+            [preferenceType: "RccRightFrontClimateSeat_Rq", preferenceValue: "Off"],
+            [preferenceType: "RccRightRearClimateSeat_Rq",  preferenceValue: "Off"],
+            [preferenceType: "SetPointTemp_Rq",           preferenceValue: "22_0"],
+        ]
+    }
+
+    // Step 2: PUT update with crccStateFlag and current preferences
+    Map updateBody = [crccStateFlag: flag, userPreferences: userPreferences, vin: vin]
+    logDebug("sendRccCommand(${flag}): sending update body: ${JsonOutput.toJson(updateBody)}")
+    boolean success = false
+    try {
+        httpPut([
+            uri:                "${FORD_VEHICLE_API}/rcc/profile/update",
+            headers:            fordHeaders,
+            body:               JsonOutput.toJson(updateBody),
+            requestContentType: "application/json",
+            contentType:        "application/json",
+        ]) { resp ->
+            success = (resp.status >= 200 && resp.status < 300)
+            logDebug("sendRccCommand(${flag}): profile/update HTTP ${resp.status} — ${resp.data}")
+        }
+    } catch (groovyx.net.http.HttpResponseException e) {
+        String errBody = ""
+        try { errBody = e.response?.data?.toString() ?: "" } catch (Exception ignored) {}
+        logError("sendRccCommand(${flag}): profile/update HTTP ${e.statusCode} — ${errBody ?: e.message}")
+    } catch (Exception e) {
+        logError("sendRccCommand(${flag}): profile/update ${e.message}")
     }
     return success
 }
