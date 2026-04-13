@@ -850,35 +850,37 @@ Map fetchVehicleList() {
 
 /**
  * Fetch full vehicle status / metrics for the given VIN.
- * Returns the raw parsed JSON Map, or null on failure.
+ * Returns the raw parsed JSON Map (with "metrics" at the root), or null on failure.
  *
- * Same endpoint, method, and auth as fetchVehicleList — both use
- * FORD_VEHICLE_API/expdashboard/v1/details/ with auth-token header.
+ * Uses the Autonomic telemetry API — NOT the Ford dashboard endpoint.
+ * The response structure is:
+ *   { "metrics": { ... }, "states": { ... }, "events": [...], ... }
+ *
+ * Auth: "Authorization: Bearer {autoToken}" (Autonomic token, NOT ford auth-token)
+ * Mirrors fordpass_bridge.py::req_status() (do_as_post=False path)
  */
 Map fetchVehicleStatus(String vin) {
     logDebug("fetchVehicleStatus(${vin})")
     if (!ensureValidTokens()) { return null }
 
-    Map regionCfg = REGIONS[state.region ?: "usa"]
-    Map headers   = API_HEADERS + [
-        "auth-token":     state.fordToken,
-        "Application-Id": regionCfg.app_id,
-        "countryCode":    regionCfg.countrycode,
-        "locale":         regionCfg.locale,
+    Map headers = [
+        "Accept-Encoding": "gzip",
+        "Connection":      "keep-alive",
+        "User-Agent":      "okhttp/4.12.0",
+        "Authorization":   "Bearer ${state.autoToken}",
     ]
-    String body = JsonOutput.toJson([dashboardRefreshRequest: "All"])
 
     Map result = null
     try {
-        httpPost([
-            uri:                "${FORD_VEHICLE_API}/expdashboard/v1/details/",
-            headers:            headers,
-            body:               body,
-            requestContentType: "application/json",
-            contentType:        "application/json",
+        httpGet([
+            uri:         "${AUTONOMIC_API_URL}/telemetry/sources/fordpass/vehicles/${vin}",
+            query:       ["lrdt": "01-01-1970 00:00:00"],
+            headers:     headers,
+            contentType: "application/json",
         ]) { resp ->
-            if (resp.status == 200 || resp.status == 207) {
+            if (resp.status == 200) {
                 result = resp.data as Map
+                logDebug("fetchVehicleStatus: HTTP 200 — metrics keys: ${(result?.metrics as Map)?.keySet()?.take(10)}")
             } else {
                 logError("fetchVehicleStatus: HTTP ${resp.status}")
             }

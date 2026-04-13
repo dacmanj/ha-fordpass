@@ -203,25 +203,22 @@ def disableGuardMode() {
 
 /**
  * Entry point for incoming vehicle data from the app's pollVehicle().
- * rawData is the parsed JSON Map from GET /api/expdashboard/v1/details/
  *
- * The JSON has these top-level sections (mirrors fordpass_handler.py ROOT_* constants):
- *   vehiclestatus.metrics   — sensor readings (odometer, fuel, tires, etc.)
- *   vehiclestatus.states    — discrete states (lock, door, ignition, etc.)
- *   vehiclestatus.events    — event log
- *   gps                     — location
+ * Actual API structure (mirrors fordpass_handler.py ROOT_* constants):
+ *   rawData.metrics  — Map<String, {value, updateTime}> for scalars,
+ *                      List<{value, vehicleDoor/vehicleWheel/...}> for arrays
+ *   rawData.states   — only deviceConnectivity / commandPreclusion (rarely useful)
+ *   rawData.metrics.position.value.location — GPS {lat, lon, alt}
+ *
+ * NOTE: there is NO "vehiclestatus" wrapper — metrics is at the root.
  */
 void parseVehicleData(Map rawData) {
     logDebug("parseVehicleData()")
     if (!rawData) { logWarn("parseVehicleData: null data"); return }
 
     try {
-        def vehicleStatus = rawData.vehiclestatus ?: rawData
-
-        parseMetrics(vehicleStatus.metrics ?: [:])
-        parseStates(vehicleStatus.states   ?: [:])
-        parseGps(rawData.gps               ?: vehicleStatus.gps ?: [:])
-
+        def metrics = rawData.metrics ?: [:]
+        parseMetrics(metrics)
         sendEvent(name: "lastUpdated", value: new Date().toString())
     } catch (Exception e) {
         logError("parseVehicleData: ${e.message}")
@@ -229,171 +226,177 @@ void parseVehicleData(Map rawData) {
 }
 
 // ---------------------------------------------------------------------------
-// Metrics parsing (fordpass_handler.py metric keys)
+// Metrics parsing
 // ---------------------------------------------------------------------------
 
 private void parseMetrics(def metrics) {
     if (!metrics) return
 
-    // --- Odometer ---
-    safeMetric(metrics, "odometer") { v ->
-        sendEvent(name: "odometer", value: v as BigDecimal, unit: settings.distanceUnit ?: "miles")
-    }
+    // --- Scalar metrics: metrics[key] = { "value": <scalar>, "updateTime": "..." } ---
 
-    // --- Fuel ---
-    safeMetric(metrics, "fuelLevel") { v ->
-        sendEvent(name: "fuelLevel", value: (v as BigDecimal).setScale(1, BigDecimal.ROUND_HALF_UP), unit: "%")
-    }
-    safeMetric(metrics, "dteForMilesHvb") { v ->
-        sendEvent(name: "fuelRange", value: v as BigDecimal, unit: settings.distanceUnit ?: "miles")
-    }
+    // Ford API always returns distances in kilometres — convert if user prefers miles
+    safeVal(metrics, "odometer")         { v -> sendEvent(name: "odometer",     value: convertDistance(v), unit: settings.distanceUnit ?: "miles") }
 
-    // --- EV battery ---
-    safeMetric(metrics, "xevBatteryStateOfCharge") { v ->
-        sendEvent(name: "batterySOC", value: (v as BigDecimal).setScale(1, BigDecimal.ROUND_HALF_UP), unit: "%")
-    }
-    safeMetric(metrics, "xevBatteryRange") { v ->
-        sendEvent(name: "batteryRange", value: v as BigDecimal, unit: settings.distanceUnit ?: "miles")
-    }
-    safeMetric(metrics, "xevPlugChargerStatus") { v ->
-        sendEvent(name: "plugStatus", value: v?.toString())
-    }
-    safeMetric(metrics, "xevBatteryChargeDisplayStatus") { v ->
-        sendEvent(name: "chargingStatus", value: v?.toString())
-        // Mirror to switch so automations can key off it
-    }
-    safeMetric(metrics, "xevChargerPowertype") { v ->
-        // power in kW — sometimes named differently
-    }
+    safeVal(metrics, "fuelLevel")        { v -> sendEvent(name: "fuelLevel",    value: (v as BigDecimal).setScale(1, BigDecimal.ROUND_HALF_UP), unit: "%") }
+    safeVal(metrics, "fuelRange")        { v -> sendEvent(name: "fuelRange",    value: convertDistance(v), unit: settings.distanceUnit ?: "miles") }
 
-    // --- Tires (key names from const_tags.py) ---
-    String pUnit = settings.pressureUnit ?: "PSI"
-    safeMetric(metrics, "tirePressureSystemStatus") { v ->
-        // aggregate; individual values below
-    }
-    safeMetric(metrics, "tirePressureFrontLeft")  { v -> sendEvent(name: "tirePressureFL", value: convertPressure(v, pUnit), unit: pUnit) }
-    safeMetric(metrics, "tirePressureFrontRight") { v -> sendEvent(name: "tirePressureFR", value: convertPressure(v, pUnit), unit: pUnit) }
-    safeMetric(metrics, "tirePressureRearLeft")   { v -> sendEvent(name: "tirePressureRL", value: convertPressure(v, pUnit), unit: pUnit) }
-    safeMetric(metrics, "tirePressureRearRight")  { v -> sendEvent(name: "tirePressureRR", value: convertPressure(v, pUnit), unit: pUnit) }
-    sendEvent(name: "tirePressureUnit", value: pUnit)
+    safeVal(metrics, "xevBatteryStateOfCharge") { v -> sendEvent(name: "batterySOC",   value: (v as BigDecimal).setScale(1, BigDecimal.ROUND_HALF_UP), unit: "%") }
+    safeVal(metrics, "xevBatteryRange")  { v -> sendEvent(name: "batteryRange", value: convertDistance(v), unit: settings.distanceUnit ?: "miles") }
+    safeVal(metrics, "xevPlugChargerStatus")          { v -> sendEvent(name: "plugStatus",     value: v?.toString()) }
+    safeVal(metrics, "xevBatteryChargeDisplayStatus") { v -> sendEvent(name: "chargingStatus", value: v?.toString()) }
 
-    // --- Temperatures ---
-    safeMetric(metrics, "ambientTemp") { v ->
-        BigDecimal celsius = v as BigDecimal
-        sendEvent(name: "temperature", value: celsius, unit: "°C")
-        sendEvent(name: "outsideTemperature", value: celsius, unit: "°C")
-    }
-    safeMetric(metrics, "coolantTemp") { v ->
-        sendEvent(name: "engineCoolantTemp", value: v as BigDecimal, unit: "°C")
-    }
-    safeMetric(metrics, "engineOilTemp") { v ->
-        sendEvent(name: "engineOilTemp", value: v as BigDecimal, unit: "°C")
-    }
-
-    // --- Oil life ---
-    safeMetric(metrics, "oilLifeRemaining") { v ->
-        sendEvent(name: "oilLife", value: v as BigDecimal, unit: "%")
-    }
-
-    // --- Speed ---
-    safeMetric(metrics, "vehicleSpeed") { v ->
-        sendEvent(name: "speed", value: v as BigDecimal, unit: settings.distanceUnit == "miles" ? "mph" : "km/h")
-    }
-}
-
-// ---------------------------------------------------------------------------
-// States parsing
-// ---------------------------------------------------------------------------
-
-private void parseStates(def states) {
-    if (!states) return
-
-    // --- Lock ---
-    safeState(states, "doorLockStatus") { v ->
-        sendEvent(name: "lockState", value: v?.toString())
-        // Map to Hubitat capability value
-        String hubitatLock
-        switch (v?.toString()?.toUpperCase()) {
-            case "LOCKED":        hubitatLock = "locked";   break
-            case "UNLOCKED":      hubitatLock = "unlocked"; break
-            case "PARTLY_LOCKED": hubitatLock = "unlocked"; break  // treat partial as unlocked
-            default:              hubitatLock = "unknown"
-        }
-        sendEvent(name: "lock", value: hubitatLock)
-    }
-
-    // --- Ignition ---
-    safeState(states, "ignitionStatus") { v ->
+    safeVal(metrics, "ignitionStatus")   { v ->
         sendEvent(name: "ignition", value: v?.toString())
-        // Remote start is "on" when ignition is active without a key
-        sendEvent(name: "switch", value: (v?.toString()?.toUpperCase() == "START") ? "on" : "off")
+        sendEvent(name: "switch", value: (v?.toString()?.toUpperCase() in ["START", "RUN"]) ? "on" : "off")
     }
+    safeVal(metrics, "alarmStatus")      { v -> sendEvent(name: "alarmStatus",       value: v?.toString()) }
+    safeVal(metrics, "deepSleepStatus")  { v -> sendEvent(name: "deepSleepMode",     value: v?.toString()) }
 
-    // --- Doors ---
-    safeState(states, "driverDoor")          { v -> sendEvent(name: "doorStatusDriver",    value: normaliseDoor(v)) }
-    safeState(states, "passengerDoor")       { v -> sendEvent(name: "doorStatusPassenger", value: normaliseDoor(v)) }
-    safeState(states, "leftRearDoor")        { v -> sendEvent(name: "doorStatusRearLeft",  value: normaliseDoor(v)) }
-    safeState(states, "rightRearDoor")       { v -> sendEvent(name: "doorStatusRearRight", value: normaliseDoor(v)) }
-    safeState(states, "hoodDoor")            { v -> sendEvent(name: "doorStatusHood",      value: normaliseDoor(v)) }
-    safeState(states, "tailgateDoor")        { v -> sendEvent(name: "doorStatusTailgate",  value: normaliseDoor(v)) }
+    safeVal(metrics, "oilLifeRemaining") { v -> sendEvent(name: "oilLife",           value: v as BigDecimal, unit: "%") }
+    safeVal(metrics, "ambientTemp")      { v -> sendEvent(name: "temperature",        value: v as BigDecimal, unit: "°C") }
+    safeVal(metrics, "engineOilTemp")    { v -> sendEvent(name: "engineOilTemp",      value: v as BigDecimal, unit: "°C") }
+    safeVal(metrics, "coolantTemp")      { v -> sendEvent(name: "engineCoolantTemp",  value: v as BigDecimal, unit: "°C") }
+    safeVal(metrics, "vehicleSpeed")     { v -> sendEvent(name: "speed",              value: v as BigDecimal) }
 
-    // --- Windows ---
-    safeState(states, "driverWindowPosition")    { v -> sendEvent(name: "windowStatusDriver",    value: normaliseWindow(v)) }
-    safeState(states, "passengerWindowPosition") { v -> sendEvent(name: "windowStatusPassenger", value: normaliseWindow(v)) }
-    safeState(states, "rearDriverWindowPos")     { v -> sendEvent(name: "windowStatusRearLeft",  value: normaliseWindow(v)) }
-    safeState(states, "rearPassWindowPos")       { v -> sendEvent(name: "windowStatusRearRight", value: normaliseWindow(v)) }
+    // --- Array metrics ---
 
-    // --- Alarm ---
-    safeState(states, "alarmStatus") { v ->
-        sendEvent(name: "alarmStatus", value: v?.toString())
-    }
+    // doorLockStatus: [{value:"LOCKED|UNLOCKED", vehicleDoor:"FRONT_LEFT|...", vehicleSide:"LH|RH"}, ...]
+    parseDoorLockArray(metrics.doorLockStatus)
 
-    // --- Deep sleep ---
-    safeState(states, "deepSleepStatus") { v ->
-        sendEvent(name: "deepSleepMode", value: v?.toString())
-    }
+    // doorStatus: [{value:"CLOSED|OPEN|INVALID", vehicleDoor:"...", vehicleSide:"..."}, ...]
+    parseDoorStatusArray(metrics.doorStatus)
+
+    // windowStatus: [{value:{doubleRange:{lowerBound:0.0,upperBound:0.0}}, vehicleWindow:"...", vehicleSide:"..."}, ...]
+    parseWindowStatusArray(metrics.windowStatus)
+
+    // tirePressure: [{value:<kPa>, vehicleWheel:"FRONT_LEFT|FRONT_RIGHT|REAR_LEFT|REAR_RIGHT"}, ...]
+    parseTirePressureArray(metrics.tirePressure)
+
+    // GPS: metrics.position.value.location → {lat, lon, alt}
+    parsePosition(metrics.position?.value?.location)
+}
+
+private void parseDoorLockArray(def lockList) {
+    if (!lockList) return
+    try {
+        int total = 0, locked = 0
+        lockList.each { entry ->
+            def val = entry?.value?.toString()?.toUpperCase()
+            if (val != null) { total++; if (val == "LOCKED") locked++ }
+        }
+        if (total == 0) return
+        String lockState
+        if (locked >= total)    { lockState = "LOCKED";        sendEvent(name: "lock", value: "locked") }
+        else if (locked > 0)    { lockState = "PARTLY_LOCKED"; sendEvent(name: "lock", value: "unlocked") }
+        else                    { lockState = "UNLOCKED";       sendEvent(name: "lock", value: "unlocked") }
+        sendEvent(name: "lockState", value: lockState)
+    } catch (Exception e) { logDebug("parseDoorLockArray: ${e.message}") }
+}
+
+private void parseDoorStatusArray(def doorList) {
+    if (!doorList) return
+    try {
+        doorList.each { entry ->
+            def val  = entry?.value?.toString()?.toUpperCase()
+            def door = entry?.vehicleDoor?.toString()?.toUpperCase()
+            def side = entry?.vehicleSide?.toString()?.toUpperCase()
+            String norm = normaliseDoor(val)
+
+            if      (door == "FRONT_LEFT"  || (door == "UNSPECIFIED_FRONT" && side == "LH")) sendEvent(name: "doorStatusDriver",    value: norm)
+            else if (door == "FRONT_RIGHT" || (door == "UNSPECIFIED_FRONT" && side == "RH")) sendEvent(name: "doorStatusPassenger", value: norm)
+            else if (door == "REAR_LEFT"   || (door == "UNSPECIFIED_REAR"  && side == "LH")) sendEvent(name: "doorStatusRearLeft",  value: norm)
+            else if (door == "REAR_RIGHT"  || (door == "UNSPECIFIED_REAR"  && side == "RH")) sendEvent(name: "doorStatusRearRight", value: norm)
+            else if (door == "HOOD")                                                          sendEvent(name: "doorStatusHood",      value: norm)
+            else if (door in ["TAILGATE","TRUNK","LIFTGATE"])                                 sendEvent(name: "doorStatusTailgate",  value: norm)
+        }
+    } catch (Exception e) { logDebug("parseDoorStatusArray: ${e.message}") }
+}
+
+private void parseWindowStatusArray(def windowList) {
+    if (!windowList) return
+    try {
+        windowList.each { entry ->
+            def window = entry?.vehicleWindow?.toString()?.toUpperCase()
+            def side   = entry?.vehicleSide?.toString()?.toUpperCase()
+            def dr     = entry?.value?.doubleRange
+            boolean open = dr && (dr.lowerBound != 0.0 || dr.upperBound != 0.0)
+            String norm  = open ? "open" : "closed"
+
+            if      (window == "FRONT_LEFT"  || (window?.contains("FRONT") && side == "LH")) sendEvent(name: "windowStatusDriver",    value: norm)
+            else if (window == "FRONT_RIGHT" || (window?.contains("FRONT") && side == "RH")) sendEvent(name: "windowStatusPassenger", value: norm)
+            else if (window == "REAR_LEFT"   || (window?.contains("REAR")  && side == "LH")) sendEvent(name: "windowStatusRearLeft",  value: norm)
+            else if (window == "REAR_RIGHT"  || (window?.contains("REAR")  && side == "RH")) sendEvent(name: "windowStatusRearRight", value: norm)
+        }
+    } catch (Exception e) { logDebug("parseWindowStatusArray: ${e.message}") }
+}
+
+private void parseTirePressureArray(def tireList) {
+    if (!tireList) return
+    try {
+        String pUnit = settings.pressureUnit ?: "PSI"
+        tireList.each { entry ->
+            def wheel = entry?.vehicleWheel?.toString()?.toUpperCase()
+            def val   = entry?.value
+            if (val == null) return
+            BigDecimal converted = convertPressure(val, pUnit)
+
+            if      (wheel == "FRONT_LEFT")  sendEvent(name: "tirePressureFL", value: converted, unit: pUnit)
+            else if (wheel == "FRONT_RIGHT") sendEvent(name: "tirePressureFR", value: converted, unit: pUnit)
+            else if (wheel == "REAR_LEFT")   sendEvent(name: "tirePressureRL", value: converted, unit: pUnit)
+            else if (wheel == "REAR_RIGHT")  sendEvent(name: "tirePressureRR", value: converted, unit: pUnit)
+        }
+        sendEvent(name: "tirePressureUnit", value: pUnit)
+    } catch (Exception e) { logDebug("parseTirePressureArray: ${e.message}") }
+}
+
+private void parsePosition(def location) {
+    if (!location) return
+    try {
+        def lat = location.lat ?: location.latitude
+        def lon = location.lon ?: location.longitude
+        if (lat != null && lon != null) {
+            sendEvent(name: "latitude",  value: lat as BigDecimal)
+            sendEvent(name: "longitude", value: lon as BigDecimal)
+            sendEvent(name: "presence",  value: "present")
+        }
+        if (location.alt != null) {
+            // altitude available but no attribute for it; log for debugging
+            logDebug("parsePosition: alt=${location.alt}")
+        }
+    } catch (Exception e) { logDebug("parsePosition: ${e.message}") }
 }
 
 // ---------------------------------------------------------------------------
-// GPS parsing
+// Helpers
 // ---------------------------------------------------------------------------
 
-private void parseGps(def gps) {
-    if (!gps) return
-
-    def lat = gps.latitude  ?: gps.lat
-    def lon = gps.longitude ?: gps.lon ?: gps.lng
-
-    if (lat != null) {
-        sendEvent(name: "latitude",  value: lat as BigDecimal)
-        sendEvent(name: "longitude", value: lon as BigDecimal)
-        // PresenceSensor — always "present" (vehicle is on your account)
-        sendEvent(name: "presence", value: "present")
-    }
-    if (gps.heading != null) {
-        sendEvent(name: "heading", value: gps.heading as BigDecimal)
-    }
+/** Scalar metric extractor: metrics[key] = { "value": <v>, ... } */
+private void safeVal(def metrics, String key, Closure handler) {
+    try {
+        def raw = metrics[key]?.value
+        if (raw != null) handler(raw)
+    } catch (Exception e) { logDebug("safeVal(${key}): ${e.message}") }
 }
-
-// ---------------------------------------------------------------------------
-// Normalisation helpers
-// ---------------------------------------------------------------------------
 
 private String normaliseDoor(def raw) {
     switch (raw?.toString()?.toUpperCase()) {
-        case "CLOSED":    return "closed"
-        case "OPEN":      return "open"
-        case "AJAR":      return "ajar"
-        default:          return raw?.toString() ?: "unknown"
+        case "CLOSED":  return "closed"
+        case "OPEN":    return "open"
+        case "AJAR":    return "ajar"
+        default:        return raw?.toString()?.toLowerCase() ?: "unknown"
     }
 }
 
-private String normaliseWindow(def raw) {
-    switch (raw?.toString()?.toUpperCase()) {
-        case "CLOSED":    return "closed"
-        case "OPEN":      return "open"
-        default:          return raw?.toString() ?: "unknown"
+/**
+ * Ford API returns distances in kilometres.
+ * Convert to miles when the driver preference is set to "miles".
+ */
+private BigDecimal convertDistance(def kmValue) {
+    BigDecimal km = kmValue as BigDecimal
+    if ((settings.distanceUnit ?: "miles") == "miles") {
+        return (km / 1.609344).setScale(1, BigDecimal.ROUND_HALF_UP)
     }
+    return km.setScale(1, BigDecimal.ROUND_HALF_UP)
 }
 
 /**
@@ -406,51 +409,6 @@ private BigDecimal convertPressure(def kPaValue, String targetUnit) {
         case "PSI":  return (kPa * 0.145038).setScale(1, BigDecimal.ROUND_HALF_UP)
         case "BAR":  return (kPa / 100).setScale(2, BigDecimal.ROUND_HALF_UP)
         default:     return kPa.setScale(1, BigDecimal.ROUND_HALF_UP)  // kPa
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Safe metric / state extractors
-// ---------------------------------------------------------------------------
-
-/**
- * metrics may be a List of {key, value, status} objects or a flat Map.
- * Handle both shapes from the API response.
- */
-private void safeMetric(def metrics, String key, Closure handler) {
-    try {
-        def raw = null
-        if (metrics instanceof List) {
-            def entry = metrics.find { it.key == key || it.name == key }
-            raw = entry?.value
-        } else if (metrics instanceof Map) {
-            raw = metrics[key]?.value ?: metrics[key]
-        }
-        if (raw != null) {
-            handler(raw)
-        }
-    } catch (Exception e) {
-        logDebug("safeMetric(${key}): ${e.message}")
-    }
-}
-
-/**
- * states may also be a List or Map — same dual-shape handling.
- */
-private void safeState(def states, String key, Closure handler) {
-    try {
-        def raw = null
-        if (states instanceof List) {
-            def entry = states.find { it.key == key || it.name == key }
-            raw = entry?.value
-        } else if (states instanceof Map) {
-            raw = states[key]?.value ?: states[key]
-        }
-        if (raw != null) {
-            handler(raw)
-        }
-    } catch (Exception e) {
-        logDebug("safeState(${key}): ${e.message}")
     }
 }
 
