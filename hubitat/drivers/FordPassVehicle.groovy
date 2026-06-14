@@ -127,7 +127,19 @@ metadata {
 
 def installed()  { logInfo("installed"); initialize() }
 def updated()    { logInfo("updated");   initialize() }
-def initialize() { logDebug("initialize") }
+def initialize() {
+    logDebug("initialize")
+    if (settings.enableDebugLog) {
+        runIn(7200, "disableDebugLog")
+    } else {
+        unschedule("disableDebugLog")
+    }
+}
+
+def disableDebugLog() {
+    logInfo("Debug logging automatically disabled after 2 hours")
+    device.updateSetting("enableDebugLog", [value: false, type: "bool"])
+}
 
 // ---------------------------------------------------------------------------
 // Standard capability commands
