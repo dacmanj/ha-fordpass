@@ -327,8 +327,9 @@ private void parseDoorStatusArray(def doorList) {
             else if (door == "FRONT_RIGHT" || (door == "UNSPECIFIED_FRONT" && side in ["RH", "PASSENGER"])) sendEvent(name: "doorStatusPassenger", value: norm)
             else if (door == "REAR_LEFT"   || (door == "UNSPECIFIED_REAR"  && side in ["LH", "DRIVER"]))    sendEvent(name: "doorStatusRearLeft",  value: norm)
             else if (door == "REAR_RIGHT"  || (door == "UNSPECIFIED_REAR"  && side in ["RH", "PASSENGER"])) sendEvent(name: "doorStatusRearRight", value: norm)
-            else if (door == "HOOD")                                                          sendEvent(name: "doorStatusHood",      value: norm)
-            else if (door in ["TAILGATE","TRUNK","LIFTGATE"])                                 sendEvent(name: "doorStatusTailgate",  value: norm)
+            else if (door == "HOOD")                                                                          sendEvent(name: "doorStatusHood",      value: norm)
+            else if (door in ["TAILGATE", "INNER_TAILGATE", "TRUNK", "LIFTGATE"])                            sendEvent(name: "doorStatusTailgate",  value: norm)
+            else logDebug("parseDoorStatusArray: unmatched entry vehicleDoor=${door} vehicleSide=${side} value=${val}")
         }
     } catch (Exception e) { logDebug("parseDoorStatusArray: ${e.message}") }
 }
