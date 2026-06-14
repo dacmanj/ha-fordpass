@@ -116,6 +116,7 @@ metadata {
               options: ["PSI": "PSI", "kPa": "kPa", "BAR": "BAR"], defaultValue: "PSI")
         input(name: "distanceUnit",    type: "enum",   title: "Distance unit",
               options: ["km": "km", "miles": "miles"], defaultValue: "miles")
+        input(name: "geofenceRadius",  type: "number", title: "Home geofence radius (metres)", defaultValue: 200)
         input(name: "enableDebugLog",  type: "bool",   title: "Enable debug logging", defaultValue: false)
     }
 }
@@ -369,20 +370,29 @@ private void parseTirePressureArray(def tireList) {
     } catch (Exception e) { logDebug("parseTirePressureArray: ${e.message}") }
 }
 
-private void parsePosition(def location) {
-    if (!location) return
+private void parsePosition(def fordLocation) {
+    if (!fordLocation) return
     try {
-        def lat = location.lat ?: location.latitude
-        def lon = location.lon ?: location.longitude
-        if (lat != null && lon != null) {
-            sendEvent(name: "latitude",  value: lat as BigDecimal)
-            sendEvent(name: "longitude", value: lon as BigDecimal)
-            sendEvent(name: "presence",  value: "present")
+        def lat = fordLocation.lat ?: fordLocation.latitude
+        def lon = fordLocation.lon ?: fordLocation.longitude
+        if (lat == null || lon == null) return
+
+        sendEvent(name: "latitude",  value: lat as BigDecimal)
+        sendEvent(name: "longitude", value: lon as BigDecimal)
+
+        // location (no qualifier) is the Hubitat hub's location object, always available in drivers
+        if (location.latitude == null || location.longitude == null) {
+            logWarn("parsePosition: hub location not configured — set lat/lon under Settings → Location to enable geofence presence")
+            return
         }
-        if (location.alt != null) {
-            // altitude available but no attribute for it; log for debugging
-            logDebug("parsePosition: alt=${location.alt}")
-        }
+        BigDecimal hubLat = location.latitude as BigDecimal
+        BigDecimal hubLon = location.longitude as BigDecimal
+
+        BigDecimal distanceM = haversineDistance(lat as BigDecimal, lon as BigDecimal, hubLat, hubLon)
+        int radius = (settings.geofenceRadius ?: 200) as int
+        String presence = distanceM <= radius ? "present" : "not present"
+        logDebug("parsePosition: distance=${distanceM.setScale(0, BigDecimal.ROUND_HALF_UP)}m radius=${radius}m → ${presence}")
+        sendEvent(name: "presence", value: presence)
     } catch (Exception e) { logDebug("parsePosition: ${e.message}") }
 }
 
@@ -430,6 +440,19 @@ private BigDecimal convertPressure(def kPaValue, String targetUnit) {
         case "BAR":  return (kPa / 100).setScale(2, BigDecimal.ROUND_HALF_UP)
         default:     return kPa.setScale(1, BigDecimal.ROUND_HALF_UP)  // kPa
     }
+}
+
+/** Haversine formula — returns distance in metres between two lat/lon points. */
+private BigDecimal haversineDistance(BigDecimal lat1, BigDecimal lon1, BigDecimal lat2, BigDecimal lon2) {
+    final double R = 6_371_000.0  // Earth radius in metres
+    double dLat = Math.toRadians((lat2 - lat1).doubleValue())
+    double dLon = Math.toRadians((lon2 - lon1).doubleValue())
+    double a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+               Math.cos(Math.toRadians(lat1.doubleValue())) *
+               Math.cos(Math.toRadians(lat2.doubleValue())) *
+               Math.sin(dLon / 2) * Math.sin(dLon / 2)
+    double c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+    return new BigDecimal(R * c)
 }
 
 // ---------------------------------------------------------------------------
