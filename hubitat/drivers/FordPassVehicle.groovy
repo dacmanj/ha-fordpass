@@ -274,9 +274,9 @@ private void parseMetrics(def metrics) {
     safeVal(metrics, "deepSleepStatus")  { v -> sendEvent(name: "deepSleepMode",     value: v?.toString()) }
 
     safeVal(metrics, "oilLifeRemaining") { v -> sendEvent(name: "oilLife",           value: v as BigDecimal, unit: "%") }
-    safeVal(metrics, "ambientTemp")      { v -> if ((v as BigDecimal) != 0) sendEvent(name: "temperature",        value: v as BigDecimal, unit: "°C") }
-    safeVal(metrics, "engineOilTemp")    { v -> if ((v as BigDecimal) != 0) sendEvent(name: "engineOilTemp",      value: v as BigDecimal, unit: "°C") }
-    safeVal(metrics, "coolantTemp")      { v -> if ((v as BigDecimal) != 0) sendEvent(name: "engineCoolantTemp",  value: v as BigDecimal, unit: "°C") }
+    safeVal(metrics, "ambientTemp")      { v -> if ((v as BigDecimal) != 0) sendEvent(name: "temperature",        value: convertTemperature(v), unit: "°${location.temperatureScale}") }
+    safeVal(metrics, "engineOilTemp")    { v -> if ((v as BigDecimal) != 0) sendEvent(name: "engineOilTemp",      value: convertTemperature(v), unit: "°${location.temperatureScale}") }
+    safeVal(metrics, "coolantTemp")      { v -> if ((v as BigDecimal) != 0) sendEvent(name: "engineCoolantTemp",  value: convertTemperature(v), unit: "°${location.temperatureScale}") }
     safeVal(metrics, "vehicleSpeed")     { v -> sendEvent(name: "speed",              value: v as BigDecimal) }
 
     // --- Array metrics ---
@@ -440,6 +440,15 @@ private BigDecimal convertPressure(def kPaValue, String targetUnit) {
         case "BAR":  return (kPa / 100).setScale(2, BigDecimal.ROUND_HALF_UP)
         default:     return kPa.setScale(1, BigDecimal.ROUND_HALF_UP)  // kPa
     }
+}
+
+/** Ford API returns temperatures in Celsius; convert to hub's preferred scale. */
+private BigDecimal convertTemperature(def celsiusValue) {
+    BigDecimal c = celsiusValue as BigDecimal
+    if (location.temperatureScale == "F") {
+        return (c * 9 / 5 + 32).setScale(1, BigDecimal.ROUND_HALF_UP)
+    }
+    return c.setScale(1, BigDecimal.ROUND_HALF_UP)
 }
 
 /** Haversine formula — returns distance in metres between two lat/lon points. */
