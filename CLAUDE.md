@@ -4,115 +4,70 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**ha-fordpass** is a Home Assistant custom integration for Ford and Lincoln vehicles via the FordPass/Lincoln Way API. It is a **cloud push integration** — data arrives over WebSocket in real time; polling is the fallback only. The API is reverse-engineered from the official mobile apps and Ford can break it without warning.
+This repo is a fork of [marq24/ha-fordpass](https://github.com/marq24/ha-fordpass), a Home Assistant custom integration for Ford and Lincoln vehicles. The **active development target is a Hubitat Elevation port** in `hubitat/`. The HA Python code in `custom_components/fordpass/` is retained as a **reference implementation** — it is the source of truth for API behavior, data structures, and auth flow, but is not being actively developed here.
 
-The `hubitat/` directory is a **separate Groovy port** of the same integration for the Hubitat Elevation hub. It is functionally parallel to the Python HA integration and shares the same API constants and auth flow, but is independent code.
+When understanding how the Ford API works, how metrics are structured, or what a command should do — read the Python first, then implement the equivalent in Groovy.
 
-## Architecture (HA integration — `custom_components/fordpass/`)
-
-### Data flow
-
-```
-FordPass API (WebSocket + REST)
-        ↓
-fordpass_bridge.py      — OAuth token lifecycle, WebSocket connection, all API calls
-        ↓
-FordPassDataUpdateCoordinator (in __init__.py)
-        ↓  coordinator.data = {metrics, states, events, vehicles, messages, rcc, ...}
-fordpass_handler.py     — parses raw Ford JSON into HA-friendly values
-        ↓
-const_tags.py           — Tag enum wires every entity to handler functions
-        ↓
-sensor.py / switch.py / lock.py / button.py / …  — thin HA platform files
-```
-
-### Key files
+## Hubitat port (`hubitat/`) — primary work target
 
 | File | Role |
 |------|------|
-| `fordpass_bridge.py` | WebSocket manager, OAuth PKCE flow, every Ford API call |
-| `fordpass_handler.py` | All data extraction: metrics → entity states/attributes |
-| `const_tags.py` | `Tag` enum — one entry per entity, with state/attr/command callbacks |
-| `__init__.py` | Integration setup, coordinator lifecycle, HA service registration |
-| `config_flow.py` | OAuth setup UI and config schema |
-| `const.py` | Hard constants: version, region app IDs, OAuth IDs |
-| `const_shared.py` | Shared constants (pressure units, manufacturers, coordinator key) |
+| `hubitat/apps/FordPassConnect.groovy` | Hubitat app: OAuth PKCE flow, dual-token management (Ford + Autonomic), API polling, child device creation |
+| `hubitat/drivers/FordPassVehicle.groovy` | Child device driver: parses vehicle data from `parseVehicleData(Map)`, exposes Hubitat capabilities and custom attributes, relays commands via `parent.*` calls |
 
-### Entity pattern
+### Driver architecture
 
-Every entity is a `Tag` in `const_tags.py`:
+The app (`FordPassConnect`) polls the Ford/Autonomic APIs and calls `childDevice.parseVehicleData(rawData)` each cycle. The driver is entirely passive — it only reads data pushed from the app and sends commands back up via `parent.sendVehicleCommand()`.
 
-```python
-Tag.BATTERY_SOC = ApiKey(
-    key="batterySOCActual",
-    state_fn=lambda data, prev: FordpassDataHandler.get_battery_soc(data),
-    attrs_fn=FordpassDataHandler.get_battery_attrs,
-)
+```
+FordPass/Autonomic API
+        ↓  (app polls REST + manages OAuth)
+FordPassConnect.groovy  (Hubitat app)
+        ↓  parseVehicleData(rawData)
+FordPassVehicle.groovy  (child device driver)
+        ↓  sendEvent(name, value, unit)
+Hubitat device attributes / capabilities
 ```
 
-- `state_fn(data, prev_state)` — reads from `coordinator.data`, returns the entity state
-- `attrs_fn(data, units)` — returns extra attributes dict
-- `on_off_fn` / `select_fn` / `press_fn` — async callbacks for write operations
-
-Platform files loop over their tag list and create entities automatically; no platform file changes are needed when adding a new sensor.
-
-### Adding a new sensor
-
-1. Add a `Tag` entry in `const_tags.py` with `state_fn` pointing to a `FordpassDataHandler` method
-2. Add an `ExtSensorEntityDescription` to the `SENSORS` list in `const_tags.py`
-3. Add the data extraction method to `fordpass_handler.py`
-
-### Adding a new command (button/switch)
-
-```python
-# const_tags.py
-MY_CMD = ApiKey(key="myCmd", press_fn=FordpassDataHandler.my_command_handler)
-
-# fordpass_handler.py
-@staticmethod
-async def my_command_handler(coordinator, vehicle):
-    return await vehicle.send_command("api_endpoint", {"param": "value"})
+`rawData` shape mirrors the HA coordinator data:
+```groovy
+rawData.metrics  // Map<String, {value, updateTime}> for scalars; List<{value, vehicleDoor/vehicleWheel/...}> for arrays
+// GPS is nested: rawData.metrics.position.value.location → {lat, lon, alt}
+// No "vehiclestatus" wrapper — metrics is at the root
 ```
 
-### Vehicle capability detection
+### Hubitat-specific conventions
 
-Use `coordinator.tag_not_supported_by_vehicle(tag)` before creating entities. Tags in `EV_ONLY_TAGS`, `FUEL_OR_PEV_ONLY_TAGS`, and `RCC_TAGS` (defined in `const_tags.py`) are filtered at setup time based on detected engine type.
+- **Unit conversion**: use `location.temperatureScale` ("C"/"F") for temperatures; driver preferences for pressure (PSI/kPa/BAR) and distance (km/miles). Ford API always delivers Celsius and kilometres.
+- **Geofence presence**: `location.latitude` / `location.longitude` give the hub's configured coordinates. Haversine distance vs. configurable radius drives the `PresenceSensor` `present`/`not present` value.
+- **Hub location guard**: if `location.latitude` is null, log a `warn` and skip presence — don't silently fail.
+- **Debug logging**: gated on `settings.enableDebugLog`; unmatched/unexpected API values should log at debug, not warn.
+- **`safeVal` helper**: standard pattern for extracting scalar metrics — `metrics[key]?.value`, swallows exceptions at debug level.
 
-### Authentication & tokens
+### Ford API field notes (discovered from real data)
 
-- OAuth 2.0 PKCE flow; initial token extracted from browser network tab (see `doc/OBTAINING_TOKEN.md`)
-- Tokens stored outside the component directory at `$HA_CONFIG/.storage/fordpass_tokens.json` (not tracked by git)
-- Access token expires every ~5 minutes; `fordpass_bridge.py` auto-refreshes before every API call
-- 401 responses trigger `_check_for_reauth()` in the coordinator
+- `doorStatus` `vehicleDoor` values vary by vehicle: Mach-E uses `UNSPECIFIED_FRONT`/`INNER_TAILGATE`; F150 uses `TAILGATE`, `INNER_TAILGATE`, `FRUNK`. `vehicleSide` can be `"LH"`/`"RH"` (traditional) or `"DRIVER"`/`"PASSENGER"` (Mach-E). Always handle both.
+- `doorLockStatus` on Mach-E only includes `UNSPECIFIED_FRONT` (driver side) + `ALL_DOORS` — no separate passenger lock entry.
+- Tire pressure values are in kPa regardless of region.
+- Temperatures are always Celsius.
+- Distances are always kilometres.
 
-### WebSocket watchdog
+## Reference implementation (`custom_components/fordpass/`)
 
-A watchdog timer fires every 64 seconds (`WEBSOCKET_WATCHDOG_INTERVAL`). If the WebSocket is unhealthy it reconnects. If the WS dies between watchdog ticks, data staleness is bounded by 64 s.
+Use this to understand the API, not as code to maintain. Key files for cross-referencing:
 
-### Error handling convention
+| File | What to look up |
+|------|----------------|
+| `fordpass_bridge.py` | OAuth PKCE flow, token refresh, WebSocket connection, exact API endpoints and headers |
+| `fordpass_handler.py` | Raw JSON → parsed values; contains commented sample API payloads for multiple vehicle types (Mach-E, F150, etc.) |
+| `const.py` | OAuth IDs, region app IDs, region → login URL mapping |
+| `const_tags.py` | Every entity the HA integration exposes, with the metric key name it reads from |
 
-- `UNSUPPORTED` (string constant) — this metric does not exist for this vehicle
-- `None` — data not yet received
-- Log at `DEBUG` for expected API failures; `WARNING`/`ERROR` only for unexpected states
-- Always use `.get()` with a default when parsing Ford JSON — responses vary by vehicle and region
-
-### Config versioning
-
-`CONFIG_VERSION` and `CONFIG_MINOR_VERSION` live in `const.py`. Bump them and add a migration branch in `async_migrate_entry()` (`__init__.py`) for any breaking config change.
-
-## Hubitat port (`hubitat/`)
-
-| File | Role |
-|------|------|
-| `apps/FordPassConnect.groovy` | Hubitat app: OAuth PKCE flow, token management, API polling, child device creation |
-| `drivers/FordPassVehicle.groovy` | Child device driver: parses vehicle data, exposes Lock/Switch/PresenceSensor capabilities and custom attributes |
-
-The Groovy code mirrors the Python logic. API constants (`OAUTH_ID`, `CLIENT_ID`, endpoint URLs, region map) are kept in sync with `const.py` and `fordpass_bridge.py`.
+The commented payload samples in `fordpass_handler.py` are particularly useful when diagnosing why a metric isn't parsing correctly.
 
 ## Development notes
 
-- **No automated tests** — testing requires real Ford API credentials and a connected vehicle
-- To debug: set `logger: custom_components.fordpass: debug` in HA `configuration.yaml`
-- Use **Developer Tools → Services** in HA to call `fordpass.refresh_status`, `fordpass.clear_tokens`, or `fordpass.poll_api`
-- Ford's API is undocumented and changes without notice; be defensive in all parsing
-- Regional endpoints differ; never hardcode a region-specific URL outside `const.py`
+- **No automated tests** — all testing requires a real connected vehicle and live Ford API credentials
+- **Ford's API is undocumented and changes without warning** — be defensive in all JSON parsing, use safe navigation (`?.`), and log unmatched values at debug level so they can be diagnosed
+- To debug the Hubitat driver: enable **"Enable debug logging"** in driver preferences; unmatched door/window/tire entries will appear in Hubitat logs identifying the exact `vehicleDoor`/`vehicleWheel` value sent by the API
+- To debug the HA reference: set `logger: custom_components.fordpass: debug` in `configuration.yaml`
