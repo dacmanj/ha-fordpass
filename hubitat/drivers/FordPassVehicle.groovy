@@ -323,10 +323,10 @@ private void parseDoorStatusArray(def doorList) {
             def side = entry?.vehicleSide?.toString()?.toUpperCase()
             String norm = normaliseDoor(val)
 
-            if      (door == "FRONT_LEFT"  || (door == "UNSPECIFIED_FRONT" && side == "LH")) sendEvent(name: "doorStatusDriver",    value: norm)
-            else if (door == "FRONT_RIGHT" || (door == "UNSPECIFIED_FRONT" && side == "RH")) sendEvent(name: "doorStatusPassenger", value: norm)
-            else if (door == "REAR_LEFT"   || (door == "UNSPECIFIED_REAR"  && side == "LH")) sendEvent(name: "doorStatusRearLeft",  value: norm)
-            else if (door == "REAR_RIGHT"  || (door == "UNSPECIFIED_REAR"  && side == "RH")) sendEvent(name: "doorStatusRearRight", value: norm)
+            if      (door == "FRONT_LEFT"  || (door == "UNSPECIFIED_FRONT" && side in ["LH", "DRIVER"]))    sendEvent(name: "doorStatusDriver",    value: norm)
+            else if (door == "FRONT_RIGHT" || (door == "UNSPECIFIED_FRONT" && side in ["RH", "PASSENGER"])) sendEvent(name: "doorStatusPassenger", value: norm)
+            else if (door == "REAR_LEFT"   || (door == "UNSPECIFIED_REAR"  && side in ["LH", "DRIVER"]))    sendEvent(name: "doorStatusRearLeft",  value: norm)
+            else if (door == "REAR_RIGHT"  || (door == "UNSPECIFIED_REAR"  && side in ["RH", "PASSENGER"])) sendEvent(name: "doorStatusRearRight", value: norm)
             else if (door == "HOOD")                                                          sendEvent(name: "doorStatusHood",      value: norm)
             else if (door in ["TAILGATE","TRUNK","LIFTGATE"])                                 sendEvent(name: "doorStatusTailgate",  value: norm)
         }
