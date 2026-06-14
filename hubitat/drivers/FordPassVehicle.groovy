@@ -273,9 +273,9 @@ private void parseMetrics(def metrics) {
     safeVal(metrics, "deepSleepStatus")  { v -> sendEvent(name: "deepSleepMode",     value: v?.toString()) }
 
     safeVal(metrics, "oilLifeRemaining") { v -> sendEvent(name: "oilLife",           value: v as BigDecimal, unit: "%") }
-    safeVal(metrics, "ambientTemp")      { v -> sendEvent(name: "temperature",        value: v as BigDecimal, unit: "°C") }
-    safeVal(metrics, "engineOilTemp")    { v -> sendEvent(name: "engineOilTemp",      value: v as BigDecimal, unit: "°C") }
-    safeVal(metrics, "coolantTemp")      { v -> sendEvent(name: "engineCoolantTemp",  value: v as BigDecimal, unit: "°C") }
+    safeVal(metrics, "ambientTemp")      { v -> if ((v as BigDecimal) != 0) sendEvent(name: "temperature",        value: v as BigDecimal, unit: "°C") }
+    safeVal(metrics, "engineOilTemp")    { v -> if ((v as BigDecimal) != 0) sendEvent(name: "engineOilTemp",      value: v as BigDecimal, unit: "°C") }
+    safeVal(metrics, "coolantTemp")      { v -> if ((v as BigDecimal) != 0) sendEvent(name: "engineCoolantTemp",  value: v as BigDecimal, unit: "°C") }
     safeVal(metrics, "vehicleSpeed")     { v -> sendEvent(name: "speed",              value: v as BigDecimal) }
 
     // --- Array metrics ---
