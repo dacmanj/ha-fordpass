@@ -148,14 +148,16 @@ def disableDebugLog() {
 def lock() {
     logInfo("lock()")
     if (parent.sendVehicleCommand("lock")) {
-        sendEvent(name: "lock", value: "locked")
+        sendEvent(name: "lock",      value: "locked")
+        sendEvent(name: "lockState", value: "LOCKED")
     }
 }
 
 def unlock() {
     logInfo("unlock()")
     if (parent.sendVehicleCommand("unlock")) {
-        sendEvent(name: "lock", value: "unlocked")
+        sendEvent(name: "lock",      value: "unlocked")
+        sendEvent(name: "lockState", value: "UNLOCKED")
     }
 }
 
@@ -312,6 +314,24 @@ private void parseMetrics(def metrics) {
 private void parseDoorLockArray(def lockList) {
     if (!lockList) return
     try {
+        // ALL_DOORS is an authoritative aggregate entry present on Mach-E and others.
+        // Individual door entries (e.g. UNSPECIFIED_FRONT) can lag behind the aggregate
+        // after an auto-lock event, causing a false PARTLY_LOCKED reading. Use ALL_DOORS
+        // directly when available to avoid counting a stale individual entry against it.
+        def allDoors = lockList.find { it?.vehicleDoor?.toString()?.toUpperCase() == "ALL_DOORS" }
+        if (allDoors) {
+            def val = allDoors?.value?.toString()?.toUpperCase()
+            if (val == "LOCKED") {
+                sendEvent(name: "lock", value: "locked")
+                sendEvent(name: "lockState", value: "LOCKED")
+            } else if (val != null) {
+                sendEvent(name: "lock", value: "unlocked")
+                sendEvent(name: "lockState", value: "UNLOCKED")
+            }
+            return
+        }
+
+        // Fallback for vehicles without an ALL_DOORS aggregate entry
         int total = 0, locked = 0
         lockList.each { entry ->
             def val = entry?.value?.toString()?.toUpperCase()

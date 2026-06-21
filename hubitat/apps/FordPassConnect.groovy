@@ -964,6 +964,7 @@ boolean sendVehicleCommand(String commandName, Map props = [:], String version =
     } catch (Exception e) {
         logError("sendVehicleCommand(${commandName}): ${e.message}")
     }
+
     return success
 }
 
