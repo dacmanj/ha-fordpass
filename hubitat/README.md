@@ -36,6 +36,25 @@ After setup the app polls the Ford/Autonomic APIs on a configurable interval and
 
 ---
 
+## ABRP Live Data (Optional)
+
+The app can push live telemetry to [A Better Route Planner](https://abetterrouteplanner.com) (ABRP)
+on every poll, so ABRP's route/energy predictions use your vehicle's real-time SOC, position, speed,
+and charging state instead of stale data.
+
+Setup:
+
+1. In the ABRP app or abetterrouteplanner.com, open your vehicle → **Live Data** → link it using the
+   **Generic** connection method. ABRP gives you a token.
+2. In the FordPass Connect app's main page, enable **Push live telemetry to ABRP** and paste that
+   token into **ABRP Generic Token**.
+
+Telemetry (SOC, lat/lon, speed, external temperature, charging state) is sent to ABRP's telemetry
+endpoint (`api.iternio.com/1/tlm/send`) right after each scheduled poll — so the ABRP push interval
+matches your **Polling Interval** setting. No separate schedule or child device is created for this.
+
+---
+
 ## Supported Vehicles
 
 Any Ford or Lincoln with an active FordPass or Lincoln Way connectivity subscription. Feature availability varies by vehicle:
