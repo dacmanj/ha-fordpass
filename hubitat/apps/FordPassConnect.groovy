@@ -53,6 +53,12 @@ definition(
 @Field String AUTONOMIC_API_URL      = "https://api.autonomic.ai/v1"
 @Field String AUTONOMIC_BETA_API_URL = "https://api.autonomic.ai/v1beta"
 
+// ABRP's public "Generic" telemetry API key — shared by DIY/generic telemetry
+// integrations that don't register their own app with Iternio. Paired with a
+// per-vehicle "Generic" token obtained from the ABRP app (Vehicle → Live Data → Generic).
+@Field String ABRP_API_KEY       = "32b2162f-9599-4647-8139-66e9f9528370"
+@Field String ABRP_TELEMETRY_URL = "https://api.iternio.com/1/tlm/send"
+
 // Default HTTP headers matching the FordPass Android app (okhttp/4.12.0)
 @Field Map DEFAULT_HEADERS = [
     "Accept-Encoding": "gzip",
@@ -232,6 +238,29 @@ def mainPage() {
                 defaultValue: "5",
                 required:     true
             )
+        }
+
+        section("ABRP (A Better Route Planner) Live Data") {
+            input(
+                name:           "abrpEnabled",
+                type:           "bool",
+                title:          "Push live telemetry to ABRP",
+                defaultValue:   false,
+                submitOnChange: true
+            )
+            if (settings.abrpEnabled) {
+                paragraph(
+                    "In the ABRP app: open your vehicle → <b>Live Data</b> → link it using the " +
+                    "<b>Generic</b> connection method, then paste the token it gives you below. " +
+                    "Telemetry is pushed to ABRP every time this app polls the vehicle (see Polling Interval above)."
+                )
+                input(
+                    name:     "abrpToken",
+                    type:     "text",
+                    title:    "ABRP Generic Token",
+                    required: true
+                )
+            }
         }
 
         section("Logging") {
@@ -780,6 +809,85 @@ void pollVehicle() {
         child.parseVehicleData(data)
     } else {
         logWarn("pollVehicle: child device not found for VIN ${state.vin}")
+    }
+
+    pushAbrpTelemetry(data)
+}
+
+// ---------------------------------------------------------------------------
+// ABRP (A Better Route Planner) live telemetry
+// ---------------------------------------------------------------------------
+
+/**
+ * Push live telemetry to ABRP after a successful poll.
+ *
+ * Reads directly from the raw Autonomic metrics (not the driver's converted,
+ * unit-scaled attributes) so ABRP always gets km/h, %, and Celsius regardless
+ * of the driver's distance/temperature preferences.
+ *
+ * Mirrors the request shape used by Iternio's own reference client
+ * (github.com/iternio/autopi-link): a GET to /1/tlm/send with api_key, token,
+ * and a compact JSON "tlm" object all in the query string.
+ */
+void pushAbrpTelemetry(Map rawData) {
+    if (!settings.abrpEnabled) return
+    if (!settings.abrpToken) {
+        logWarn("pushAbrpTelemetry: ABRP push enabled but no token configured — skipping")
+        return
+    }
+
+    Map metrics = rawData?.metrics ?: [:]
+    Map tlm = [utc: (long)(new Date().time / 1000)]
+
+    def soc = metrics.xevBatteryStateOfCharge?.value
+    if (soc != null) tlm.soc = soc as BigDecimal
+
+    def speed = metrics.vehicleSpeed?.value
+    if (speed != null) tlm.speed = speed as BigDecimal
+
+    def loc = metrics.position?.value?.location
+    def lat = loc?.lat ?: loc?.latitude
+    def lon = loc?.lon ?: loc?.longitude
+    if (lat != null && lon != null) {
+        tlm.lat = lat as BigDecimal
+        tlm.lon = lon as BigDecimal
+    }
+
+    // Ford API returns 0 for "no sensor reading" as well as a genuine 0°C — same
+    // convention the driver uses for ambientTemp, so treat 0 as "unavailable" here too.
+    def extTemp = metrics.ambientTemp?.value
+    if (extTemp != null && (extTemp as BigDecimal) != 0) tlm.ext_temp = extTemp as BigDecimal
+
+    String chargeStatus = metrics.xevBatteryChargeDisplayStatus?.value?.toString()
+    if (chargeStatus != null) tlm.is_charging = (chargeStatus == "IN_PROGRESS") ? 1 : 0
+
+    String ignition = metrics.ignitionStatus?.value?.toString()?.toUpperCase()
+    if (ignition != null) tlm.is_parked = (ignition in ["START", "RUN"]) ? 0 : 1
+
+    if (tlm.soc == null && tlm.lat == null) {
+        logDebug("pushAbrpTelemetry: no usable telemetry fields in this poll — skipping")
+        return
+    }
+
+    String tlmJson = JsonOutput.toJson(tlm)
+    String url = "${ABRP_TELEMETRY_URL}?api_key=${java.net.URLEncoder.encode(ABRP_API_KEY, 'UTF-8')}" +
+                 "&token=${java.net.URLEncoder.encode(settings.abrpToken as String, 'UTF-8')}" +
+                 "&tlm=${java.net.URLEncoder.encode(tlmJson, 'UTF-8')}"
+
+    try {
+        httpGet([uri: url]) { resp ->
+            if (resp.status == 200) {
+                logDebug("pushAbrpTelemetry: OK — ${tlmJson}")
+            } else {
+                logWarn("pushAbrpTelemetry: HTTP ${resp.status} — ${resp.data}")
+            }
+        }
+    } catch (groovyx.net.http.HttpResponseException e) {
+        String errBody = ""
+        try { errBody = e.response?.data?.toString() ?: "" } catch (Exception ignored) {}
+        logError("pushAbrpTelemetry: HTTP ${e.statusCode} — ${errBody ?: e.message}")
+    } catch (Exception e) {
+        logError("pushAbrpTelemetry: ${e.message}")
     }
 }
 
